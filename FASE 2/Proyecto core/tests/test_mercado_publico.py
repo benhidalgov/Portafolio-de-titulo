@@ -1,0 +1,587 @@
+import io
+import json
+import os
+import re
+import unittest
+from unittest.mock import patch, MagicMock
+import urllib.error
+import database
+import mercado_publico
+
+
+class TestMercadoPublico(unittest.TestCase):
+    def setUp(self):
+        self.db_name = "test_mp_licitaciones.db"
+        database.DB_NAME = self.db_name
+        if os.path.exists(self.db_name):
+            try:
+                os.remove(self.db_name)
+            except PermissionError:
+                pass
+        database.init_db()
+        # El espaciado de rate limit solo importa contra la API real; en pruebas
+        # con urlopen simulado solo sumaria espera.
+        self._intervalo_previo = os.environ.get("MERCADO_PUBLICO_INTERVALO_MS")
+        os.environ["MERCADO_PUBLICO_INTERVALO_MS"] = "0"
+
+    def tearDown(self):
+        if self._intervalo_previo is None:
+            os.environ.pop("MERCADO_PUBLICO_INTERVALO_MS", None)
+        else:
+            os.environ["MERCADO_PUBLICO_INTERVALO_MS"] = self._intervalo_previo
+        if os.path.exists(self.db_name):
+            try:
+                os.remove(self.db_name)
+            except PermissionError:
+                pass
+
+    @patch("mercado_publico.time.sleep")
+    def test_429_reintenta_y_luego_lee_la_respuesta(self, mock_sleep):
+        url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+        error_429 = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        respuesta = MagicMock()
+        respuesta.read.return_value = b'{"Listado": []}'
+        contexto_ok = MagicMock()
+        contexto_ok.__enter__.return_value = respuesta
+        mercado_publico.avisos_rate_limit["cantidad"] = 0
+
+        with patch("urllib.request.urlopen", side_effect=[error_429, contexto_ok]):
+            contenido = mercado_publico._fetch_url(url)
+
+        self.assertEqual(contenido, b'{"Listado": []}')
+        self.assertEqual(mock_sleep.call_count, 1)
+        # Un reintento que termina bien no es una consulta bloqueada.
+        self.assertEqual(mercado_publico.avisos_rate_limit["cantidad"], 0)
+
+    @patch("mercado_publico.time.sleep")
+    def test_429_persistente_degrada_y_cuenta_las_fichas_afectadas(self, mock_sleep):
+        url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+        error_429 = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        mercado_publico.avisos_rate_limit["cantidad"] = 0
+
+        with patch("urllib.request.urlopen", side_effect=error_429):
+            self.assertIsNone(mercado_publico._fetch_url(url))
+
+        # Backoff exponencial: un reintento por intento disponible.
+        self.assertEqual(mock_sleep.call_count, mercado_publico.MP_REINTENTOS_LIMITE)
+        self.assertEqual(mock_sleep.call_args_list[0].args[0], 4.0)
+        self.assertEqual(mock_sleep.call_args_list[1].args[0], 8.0)
+        self.assertEqual(mercado_publico.avisos_rate_limit["cantidad"], 1)
+
+    def test_espaciado_entre_consultas_respeta_el_intervalo(self):
+        with patch.dict(os.environ, {"MERCADO_PUBLICO_INTERVALO_MS": "500"}):
+            with patch("mercado_publico.time.sleep") as mock_sleep:
+                # Hace rato: la primera llamada no debe esperar.
+                mercado_publico._ultima_consulta["ts"] = mercado_publico.time.monotonic() - 10
+                mercado_publico._esperar_rate_limit()
+                self.assertEqual(mock_sleep.call_count, 0)
+                # Inmediata: debe respetar el intervalo.
+                mercado_publico._esperar_rate_limit()
+                self.assertEqual(mock_sleep.call_count, 1)
+                self.assertGreater(mock_sleep.call_args.args[0], 0)
+                self.assertLessEqual(mock_sleep.call_args.args[0], 0.5)
+        mercado_publico._ultima_consulta["ts"] = 0.0
+
+    def test_respeta_retry_after_y_sino_backoff_exponencial(self):
+        url = "https://api.mercadopublico.cl/x"
+        con_retry = urllib.error.HTTPError(url, 429, "Too Many Requests", {"Retry-After": "12"}, None)
+        sin_retry = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        self.assertEqual(mercado_publico._espera_reintento(con_retry, 0), 12.0)
+        self.assertEqual(mercado_publico._espera_reintento(sin_retry, 0), 4.0)
+        self.assertEqual(mercado_publico._espera_reintento(sin_retry, 1), 8.0)
+        # Nunca mas del tope.
+        self.assertEqual(mercado_publico._espera_reintento(sin_retry, 10), float(mercado_publico.MP_ESPERA_MAX_S))
+
+    @patch("mercado_publico.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_sincronizacion_avisa_cuando_la_api_limita(self, mock_urlopen, mock_sleep):
+        url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json"
+        mock_urlopen.side_effect = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+
+        resumen = mercado_publico.sincronizar_licitaciones(
+            fecha="07102026",
+            ticket="TICKET_TEST_VALIDO"
+        )
+
+        self.assertIn("HTTP 429", resumen["mensaje"])
+        self.assertIn("MERCADO_PUBLICO_INTERVALO_MS", resumen["mensaje"])
+        self.assertGreater(resumen["avisos_rate_limit"], 0)
+
+    def test_load_env_file(self):
+        test_env_content = """
+# Comentario de prueba
+TEST_KEY_ONE=valor1
+TEST_KEY_TWO="valor con espacios"
+TEST_KEY_THREE='valor simple'
+INVALID_LINE_WITHOUT_EQUALS
+"""
+        env_dict = mercado_publico.parse_env_content(test_env_content)
+        self.assertEqual(env_dict.get("TEST_KEY_ONE"), "valor1")
+        self.assertEqual(env_dict.get("TEST_KEY_TWO"), "valor con espacios")
+        self.assertEqual(env_dict.get("TEST_KEY_THREE"), "valor simple")
+        self.assertNotIn("INVALID_LINE_WITHOUT_EQUALS", env_dict)
+
+    def test_filtrar_y_clasificar_alojamiento(self):
+        item = {
+            "CodigoExterno": "2050-10-LP24",
+            "Nombre": "Servicio de hospedaje para delegacion deportiva nacional",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-10-25T15:00:00",
+            "FechaCreacion": "2026-10-01T10:00:00",
+            "Descripcion": "Alojamiento en habitaciones singles y dobles en Santiago",
+            "Comprador": {
+                "NombreOrganismo": "Instituto Nacional de Deportes",
+                "RegionUnidad": "Region Metropolitana de Santiago"
+            },
+            "MontoEstimado": 8500000
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id_licitacion"], "2050-10-LP24")
+        self.assertEqual(res["categoria"], "Alojamiento")
+        self.assertEqual(res["organismo"], "Instituto Nacional de Deportes")
+        self.assertEqual(res["presupuesto_mandante"], 8500000)
+        self.assertEqual(res["modalidad"], "Licitacion Publica")
+
+    def test_filtrar_y_clasificar_eventos_compra_agil(self):
+        item = {
+            "CodigoExterno": "1100-33-COT24",
+            "Nombre": "Servicio de coffee break y salones para jornada institucional",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-10-18T18:00:00",
+            "FechaCreacion": "2026-10-05T09:00:00",
+            "Descripcion": "Banqueteria y arriendo de salon para 50 personas",
+            "Comprador": {
+                "NombreOrganismo": "Servicio de Evaluacion Ambiental",
+                "RegionUnidad": "Region Metropolitana"
+            },
+            "MontoEstimado": 4200000
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["id_licitacion"], "1100-33-COT24")
+        self.assertEqual(res["categoria"], "Eventos / Catering")
+        self.assertEqual(res["modalidad"], "Compra Agil")
+        self.assertLessEqual(res["presupuesto_mandante"], 6900000)
+
+    def test_tope_compra_agil_configurable(self):
+        database.set_tope_compra_agil(1000000)
+        self.assertEqual(database.get_tope_compra_agil(), 1000000)
+
+        item = {
+            "CodigoExterno": "1100-44-LP24",
+            "Nombre": "Servicio de coffee break y salones",
+            "FechaCierre": "2026-10-18T18:00:00",
+            "FechaCreacion": "2026-10-05T09:00:00",
+            "Descripcion": "Banqueteria y arriendo de salon para 50 personas",
+            "Comprador": {
+                "NombreOrganismo": "Servicio de Evaluacion Ambiental",
+                "RegionUnidad": "Region Metropolitana"
+            },
+            "MontoEstimado": 4200000
+        }
+        # Con tope de 1.000.000 CLP el mismo monto deja de calificar como Compra Agil
+        self.assertEqual(mercado_publico.filtrar_y_clasificar_licitacion(item)["modalidad"], "Licitacion Publica")
+
+    def test_filtrar_y_clasificar_descarte_no_relevante(self):
+        item = {
+            "CodigoExterno": "999-88-LP24",
+            "Nombre": "Adquisicion de medicamentos e insumos clinicos para hospital",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-10-30T12:00:00",
+            "Descripcion": "Insumos hospitalarios y material quirurgico de urgencia",
+            "Comprador": {
+                "NombreOrganismo": "Servicio de Salud Metropolitano",
+                "RegionUnidad": "Region Metropolitana"
+            },
+            "MontoEstimado": 15000000
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item)
+        self.assertIsNone(res)
+
+    def test_filtrar_y_clasificar_descarta_moneda_no_clp(self):
+        # Montos en UF/USD no son comparables con el tope CLP ni con el costo base
+        item = {
+            "CodigoExterno": "5000-5-COT26",
+            "Nombre": "Servicio de hospedaje para comite de expertos",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-10-25T12:00:00",
+            "Moneda": "UF",
+            "Comprador": {
+                "NombreOrganismo": "Organismo Extranjero",
+                "RegionUnidad": "Region Metropolitana"
+            },
+            "MontoEstimado": 500
+        }
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    def test_rescata_tipeos_de_comprador_publico(self):
+        # "catring" por catering y "hospedagh" por hospedaje aparecen en los TDR.
+        item_evento = {
+            "CodigoExterno": "777-1-LP26",
+            "Nombre": "Compra de catring para convencion anual",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-11-20T12:00:00",
+            "Descripcion": "Provision de catring para asistentes",
+            "MontoEstimado": 4000000,
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item_evento)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["categoria"], "Eventos / Catering")
+
+        item_alojamiento = {
+            "CodigoExterno": "777-2-LP26",
+            "Nombre": "Servicio de hospedagh para equipo medico",
+            "CodigoEstado": 5,
+            "FechaCierre": "2026-11-20T12:00:00",
+            "Descripcion": "Hospedagh de profesionales",
+            "MontoEstimado": 4000000,
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item_alojamiento)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["categoria"], "Alojamiento")
+
+    def test_fuzzy_no_inventa_clasificacion(self):
+        # El rescate por tipeo no debe convertir un no-relevante en relevante.
+        self.assertEqual(mercado_publico.contar_terminos_fuzzy("audifonos cascos uniformes", mercado_publico.FUZZY_ALOJAMIENTO), 0)
+        self.assertEqual(mercado_publico.contar_terminos_fuzzy("audifonos cascos uniformes", mercado_publico.FUZZY_EVENTOS), 0)
+
+    def test_fuzzy_no_confunde_habilitacion_con_habitacion(self):
+        # Dos ediciones solo si el largo es casi el mismo: "habilitacion" no es "habitacion".
+        self.assertEqual(
+            mercado_publico.contar_terminos_fuzzy(
+                "habilitacion calle de rodaje", mercado_publico.FUZZY_ALOJAMIENTO
+            ),
+            0,
+        )
+        item = {
+            "CodigoExterno": "1096-6-O126",
+            "Nombre": "HABILITACIÓN CALLE DE RODAJE ALFA Y OBRAS ANEXAS AEROPUERTO PUNTA ARENAS",
+            "Descripcion": "Obras de habilitación de calle de rodaje",
+        }
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    def test_descarta_reparacion_de_habitaciones_de_oficina(self):
+        item = {
+            "CodigoExterno": "1234-1-LP26",
+            "Nombre": "REPARACIÓN DE PISOS Y CUBIERTA EN EL SECTOR COMEDOR Y EN LAS HABITACIONES DE OFICINA",
+            "Descripcion": "Trabajos de reparación",
+        }
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    def test_fuzzy_no_confunde_paqueteria_con_banqueteria(self):
+        item = {
+            "CodigoExterno": "1242140-12-LE26",
+            "Nombre": "Servicio de Courier Traslado de Sobres y Paquetería para el Hospital Provincial de Ovalle",
+        }
+        self.assertEqual(
+            mercado_publico.contar_terminos_fuzzy(
+                "servicio de courier traslado de sobres y paqueteria", mercado_publico.FUZZY_EVENTOS
+            ),
+            0,
+        )
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    def test_fuzzy_no_confunde_cuna_con_cena(self):
+        item = {
+            "CodigoExterno": "4362-10-LP26",
+            "Nombre": "MEJORAMIENTO SALA CUNA LA CRUZ NACIMIENTO",
+        }
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    def test_fuzzy_no_confunde_balones_con_salones(self):
+        item = {
+            "CodigoExterno": "1002772-101-LR26",
+            "Nombre": "BALONES DE ANGIOPLASTIA Y STENTS MEDICADOS",
+        }
+        self.assertIsNone(mercado_publico.filtrar_y_clasificar_licitacion(item))
+
+    @patch("urllib.request.urlopen")
+    def test_consultar_licitacion_api_mock(self, mock_urlopen):
+        fake_api_response = {
+            "Cantidad": 1,
+            "FechaCreacion": "2026-10-07T16:00:00",
+            "Version": "v1",
+            "Listado": [
+                {
+                    "CodigoExterno": "1058-12-COT24",
+                    "Nombre": "Servicio de Banqueteria y Salones",
+                    "CodigoEstado": 5,
+                    "FechaCierre": "2026-10-15T18:00:00",
+                    "FechaCreacion": "2026-10-01T10:00:00",
+                    "Descripcion": "Jornada de planificacion",
+                    "Comprador": {
+                        "NombreOrganismo": "Subsecretaria de Turismo",
+                        "RegionUnidad": "Region Metropolitana de Santiago"
+                    },
+                    "MontoEstimado": 5800000
+                }
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(fake_api_response).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        resultado = mercado_publico.consultar_licitacion("1058-12-COT24", ticket="MOCK_TICKET_123")
+        self.assertIsNotNone(resultado)
+        self.assertEqual(resultado["CodigoExterno"], "1058-12-COT24")
+        self.assertEqual(resultado["Nombre"], "Servicio de Banqueteria y Salones")
+
+    def test_consultar_sin_ticket_retorna_error(self):
+        # Empty or placeholder ticket should raise ValueError or return None gracefully
+        res = mercado_publico.consultar_licitacion("1058-12-COT24", ticket="")
+        self.assertIsNone(res)
+
+        res_ph = mercado_publico.consultar_licitacion("1058-12-COT24", ticket="TU_TICKET_AQUI")
+        self.assertIsNone(res_ph)
+
+    @patch("mercado_publico._fetch_url")
+    def test_consultar_url_adjuntos_extrae_token(self, mock_fetch):
+        # El HTML real usa rutas relativas y entidades; el regex busca ViewAttachment.aspx?enc=
+        mock_fetch.return_value = b"<img onclick=\"open(&#39;../Attachment/ViewAttachment.aspx?enc=AbC123%2Fz-x&#39;,'x')\"/>"
+        url = mercado_publico.consultar_url_adjuntos("1058-12-COT24")
+        self.assertEqual(
+            url,
+            "https://www.mercadopublico.cl/Procurement/Modules/Attachment/ViewAttachment.aspx?enc=AbC123%2Fz-x"
+        )
+        self.assertIn("idlicitacion=1058-12-COT24", mock_fetch.call_args[0][0])
+
+    @patch("mercado_publico._fetch_url")
+    def test_consultar_url_adjuntos_sin_token(self, mock_fetch):
+        mock_fetch.return_value = b"<html><body>Sin anexos</body></html>"
+        self.assertIsNone(mercado_publico.consultar_url_adjuntos("1058-12-COT24"))
+
+    @patch("urllib.request.urlopen")
+    def test_sincronizar_licitaciones_mock(self, mock_urlopen):
+        fake_batch_response = {
+            "Cantidad": 3,
+            "FechaCreacion": "2026-10-07T16:00:00",
+            "Version": "v1",
+            "Listado": [
+                {
+                    "CodigoExterno": "3001-1-COT24",
+                    "Nombre": "Servicio de banqueteria y salones para conferencia universitaria",
+                    "CodigoEstado": 5,
+                    "FechaCierre": "2027-10-20T17:00:00",
+                    "FechaCreacion": "2026-10-05T09:00:00",
+                    "Descripcion": "Coffee break continuo para 80 personas",
+                    "Comprador": {
+                        "NombreOrganismo": "Universidad de Santiago",
+                        "RegionUnidad": "Region Metropolitana"
+                    },
+                    "MontoEstimado": 4500000
+                },
+                {
+                    "CodigoExterno": "3002-2-LP24",
+                    "Nombre": "Construccion de veredas y pavimentacion",
+                    "CodigoEstado": 5,
+                    "FechaCierre": "2027-10-22T17:00:00",
+                    "FechaCreacion": "2026-10-05T09:00:00",
+                    "Descripcion": "Obras viales",
+                    "Comprador": {
+                        "NombreOrganismo": "Municipalidad de Maipu",
+                        "RegionUnidad": "Region Metropolitana"
+                    },
+                    "MontoEstimado": 35000000
+                },
+                {
+                    "CodigoExterno": "3003-3-COT24",
+                    "Nombre": "Alojamiento y hospedaje delegacion de investigacion",
+                    "CodigoEstado": 5,
+                    "FechaCierre": "2027-10-25T18:00:00",
+                    "FechaCreacion": "2026-10-06T11:00:00",
+                    "Descripcion": "Hospedaje de 4 noches en Santiago Centro",
+                    "Comprador": {
+                        "NombreOrganismo": "Ministerio de Ciencias",
+                        "RegionUnidad": "Region Metropolitana de Santiago"
+                    },
+                    "MontoEstimado": 5200000
+                }
+            ]
+        }
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps(fake_batch_response).encode("utf-8")
+        mock_urlopen.return_value.__enter__.return_value = mock_response
+
+        resumen = mercado_publico.sincronizar_licitaciones(
+            fecha="07102026",
+            ticket="TICKET_TEST_VALIDO"
+        )
+        self.assertEqual(resumen["total_consultadas"], 3)
+        self.assertEqual(resumen["total_pertinentes"], 2)  # Banqueteria + Alojamiento
+        self.assertEqual(resumen["total_descartadas"], 1)  # Obras viales
+        self.assertEqual(resumen["total_guardadas"], 2)
+
+        # Verify items were saved in database
+        lic1 = database.get_licitacion_by_id("3001-1-COT24")
+        self.assertIsNotNone(lic1)
+        self.assertEqual(lic1["categoria"], "Eventos / Catering")
+        self.assertEqual(lic1["modalidad"], "Compra Agil")
+
+        lic2 = database.get_licitacion_by_id("3003-3-COT24")
+        self.assertIsNotNone(lic2)
+        self.assertEqual(lic2["categoria"], "Alojamiento")
+
+        # Pasada multipledia: consulta varias fechas y reutiliza los mismos items
+        resumen_multi = mercado_publico.sincronizar_licitaciones(ticket="TICKET_TEST_VALIDO", dias=3)
+        self.assertEqual(resumen_multi["total_consultadas"], 9)
+        self.assertEqual(resumen_multi["total_guardadas"], 6)
+
+    @patch("urllib.request.urlopen")
+    def test_sincronizar_descarta_licitacion_cerrada(self, mock_urlopen):
+        batch = {
+            "Cantidad": 1,
+            "FechaCreacion": "2026-10-07T16:00:00",
+            "Version": "v1",
+            "Listado": [{
+                "CodigoExterno": "8000-8-COT26",
+                "Nombre": "Servicio de banqueteria para evento",
+                "CodigoEstado": 8,
+                "FechaCierre": "2020-01-01T17:00:00",
+            }],
+        }
+        mock_urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(batch).encode("utf-8")
+
+        resumen = mercado_publico.sincronizar_licitaciones(
+            fecha="07102026",
+            ticket="TICKET_TEST_VALIDO"
+        )
+        self.assertEqual(resumen["total_consultadas"], 1)
+        self.assertEqual(resumen["total_pertinentes"], 0)
+        self.assertGreaterEqual(resumen["total_descartadas"], 1)
+        self.assertEqual(resumen["total_guardadas"], 0)
+        self.assertIsNone(database.get_licitacion_by_id("8000-8-COT26"))
+
+    @patch("urllib.request.urlopen")
+    def test_sincronizar_enriquece_con_ficha_detalle(self, mock_urlopen):
+        # Listado por fecha: solo 4 campos basicos (como la API real)
+        batch = {
+            "Cantidad": 1, "FechaCreacion": "2026-10-07T16:00:00", "Version": "v1",
+            "Listado": [{
+                "CodigoExterno": "7000-7-COT26",
+                "Nombre": "Servicio de banqueteria para asamblea anual",
+                "CodigoEstado": 5,
+                "FechaCierre": "2027-10-20T17:00:00"
+            }]
+        }
+        # Ficha por codigo: montos y comprador anidados, como la API real
+        detalle = {
+            "Cantidad": 1, "Version": "v1",
+            "Listado": [{
+                "CodigoExterno": "7000-7-COT26",
+                "Nombre": "Servicio de banqueteria para asamblea anual",
+                "CodigoEstado": 5,
+                "FechaCierre": None,
+                "Descripcion": "Coffee break y coctel para 120 personas",
+                "Comprador": {
+                    "NombreOrganismo": "SERVICIO NACIONAL DE TURISMO",
+                    "RegionUnidad": "Region de Valparaiso"
+                },
+                "Fechas": {
+                    "MontoEstimado": 4800000.0,
+                    "FechaCreacion": "2026-10-01T00:00:00",
+                    "FechaCierre": "2027-10-20T17:00:00"
+                }
+            }]
+        }
+
+        def fake_urlopen(req, *args, **kwargs):
+            url = getattr(req, "full_url", str(req))
+            data = detalle if "codigo=" in url else batch
+            resp = MagicMock()
+            resp.read.return_value = json.dumps(data).encode("utf-8")
+            cm = MagicMock()
+            cm.__enter__.return_value = resp
+            return cm
+
+        mock_urlopen.side_effect = fake_urlopen
+
+        resumen = mercado_publico.sincronizar_licitaciones(fecha="07102026", ticket="TICKET_TEST_VALIDO")
+        self.assertEqual(resumen["total_guardadas"], 1)
+
+        lic = database.get_licitacion_by_id("7000-7-COT26")
+        self.assertEqual(lic["presupuesto_mandante"], 4800000)
+        self.assertEqual(lic["costo_base_hotel"], 3600000)
+        self.assertEqual(lic["organismo"], "SERVICIO NACIONAL DE TURISMO")
+        self.assertEqual(lic["region"], "Region de Valparaiso")
+        self.assertEqual(lic["fecha_publicacion"], "2026-10-01")
+        self.assertEqual(lic["fecha_cierre"], "2027-10-20")
+
+    def test_filtro_no_marca_documentos_como_verificados(self):
+        item = {
+            "CodigoExterno": "1100-55-COT26",
+            "Nombre": "Catering para jornada institucional",
+            "Descripcion": "Coffee break para 50 personas",
+            "MontoEstimado": 3000000,
+        }
+        res = mercado_publico.filtrar_y_clasificar_licitacion(item)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["validacion_adjuntos"], "Sin verificar")
+        self.assertEqual(res["tiene_anexo4"], 0)
+        self.assertEqual(res["tiene_escrituras"], 0)
+        self.assertEqual(res["tiene_poderes"], 0)
+        self.assertEqual(res["tiene_vigencias"], 0)
+
+    @patch("urllib.request.urlopen")
+    def test_certificado_invalido_no_se_reintenta_sin_verificar(self, mock_urlopen):
+        mock_urlopen.side_effect = urllib.error.URLError("CERTIFICATE_VERIFY_FAILED")
+        with patch("mercado_publico.time.sleep"):
+            self.assertIsNone(mercado_publico._fetch_url("https://api.mercadopublico.cl/x"))
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+    def test_ssl_context_usa_ca_bundle_configurado(self):
+        with patch.dict(os.environ, {
+            "MERCADO_PUBLICO_SSL_VERIFY": "1",
+            "MERCADO_PUBLICO_CA_BUNDLE": "C:/certs/ca.pem",
+        }):
+            with patch("mercado_publico.os.path.isfile", return_value=True):
+                with patch("mercado_publico.ssl.create_default_context") as mock_ctx:
+                    mercado_publico._create_ssl_context()
+        mock_ctx.assert_called_once_with(cafile="C:/certs/ca.pem")
+
+    @patch("mercado_publico.time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_log_no_expone_el_ticket(self, mock_urlopen, mock_sleep):
+        url = "https://api.mercadopublico.cl/servicios/v1/publico/licitaciones.json?ticket=SECRETO"
+        mock_urlopen.side_effect = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, None)
+        with self.assertLogs("mercado_publico", level="ERROR") as logs:
+            self.assertIsNone(mercado_publico._fetch_url(url))
+        salida = "\n".join(logs.output)
+        self.assertIn("ticket=***", salida)
+        self.assertNotIn("SECRETO", salida)
+
+    def test_no_emojis_in_mercado_publico_module(self):
+        emoji_pattern = re.compile(
+            "[\U00010000-\U0010ffff]|"
+            "[\u2600-\u27bf]|"
+            "[\u2300-\u23ff]|"
+            "[\u2b50\u2b55\u2934\u2935\u25aa\u25ab\u25b6\u25c0\u25fb-\u25fe]"
+        )
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        target_file = os.path.join(repo_root, "mercado_publico.py")
+        if os.path.exists(target_file):
+            with open(target_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                matches = emoji_pattern.findall(content)
+                self.assertEqual(
+                    matches,
+                    [],
+                    f"Se detectaron emojis prohibidos en {target_file}: {matches}"
+                )
+
+    def test_no_prohibited_terms_in_mercado_publico(self):
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        target_file = os.path.join(repo_root, "mercado_publico.py")
+        forbidden = "".join(["a", "i", "o", "p", "s"])
+        if os.path.exists(target_file):
+            with open(target_file, "r", encoding="utf-8") as f:
+                content = f.read()
+                self.assertNotIn(
+                    forbidden,
+                    content.lower(),
+                    f"El archivo {target_file} contiene el termino prohibido."
+                )
+
+
+if __name__ == "__main__":
+    unittest.main()

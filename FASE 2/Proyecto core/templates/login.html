@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block title %}Iniciar Sesion - Hotel Plaza San Francisco{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center py-16 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full space-y-6 card-editorial p-8 bg-white">
+        <div class="space-y-1">
+            <span class="badge-spot badge-spot-neutral">Acceso Corporativo</span>
+            <h1 class="text-2xl sm:text-3xl font-serif font-normal text-[#111111] tracking-tight pt-1">
+                Iniciar Sesion
+            </h1>
+            <p class="text-xs text-[#6E6D6A] leading-relaxed">
+                Plataforma de evaluacion comercial y postulacion a licitaciones del Estado.
+            </p>
+        </div>
+
+        <form class="space-y-4" action="{{ url_for('login') }}" method="POST">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div>
+                <label for="username" class="block text-xs font-medium text-[#111111] mb-1">Usuario</label>
+                <input id="username" name="username" type="text" required
+                    class="rounded w-full px-3 py-2 border border-[#EAEAEA] bg-[#FBFBFA] placeholder-[#6E6D6A] text-[#111111] focus:outline-none focus:border-[#111111] focus:bg-white text-xs transition-colors"
+                    placeholder="Usuario">
+            </div>
+
+            <div>
+                <label for="password" class="block text-xs font-medium text-[#111111] mb-1">Contrasena</label>
+                <input id="password" name="password" type="password" required
+                    class="rounded w-full px-3 py-2 border border-[#EAEAEA] bg-[#FBFBFA] placeholder-[#6E6D6A] text-[#111111] focus:outline-none focus:border-[#111111] focus:bg-white text-xs transition-colors"
+                    placeholder="Contrasena">
+            </div>
+
+            <div class="pt-2">
+                <button type="submit"
+                    class="w-full btn-primary py-2.5 text-xs font-medium uppercase tracking-wider">
+                    Iniciar Sesion
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

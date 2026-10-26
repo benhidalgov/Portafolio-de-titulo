@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+
+{% block title %}Ficha Tecnica {{ salon.nombre }} - Hotel Plaza San Francisco{% endblock %}
+
+{% block content %}
+<div class="space-y-8">
+    <!-- Migas de Pan y Acciones Superiores -->
+    <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4 pb-6 border-b border-[#EAEAEA]">
+        <div class="space-y-1">
+            <nav class="flex items-center space-x-2 text-xs text-[#6E6D6A]">
+                <a href="{{ url_for('dashboard') }}" class="hover:text-[#111111] transition-colors">Tablero Principal</a>
+                <span>/</span>
+                <a href="{{ url_for('salones_catalogo') }}" class="hover:text-[#111111] transition-colors">Salones y Agenda</a>
+                <span>/</span>
+                <span class="text-[#111111] font-medium">{{ salon.nombre }}</span>
+            </nav>
+            <h1 class="text-3xl font-serif font-normal tracking-tight text-[#111111] pt-1">
+                {{ salon.nombre }}
+            </h1>
+            <p class="text-xs text-[#6E6D6A] max-w-2xl leading-relaxed">
+                {{ salon.descripcion }}
+            </p>
+        </div>
+        <div class="flex items-center space-x-2">
+            <a href="{{ url_for('crear_reserva', salon=salon.id_salon) }}" class="btn-primary text-xs px-3 py-1.5">
+                + Reservar este Salon
+            </a>
+            <a href="{{ url_for('salones_catalogo') }}" class="btn-secondary text-xs px-3 py-1.5">
+                Volver al Catalogo
+            </a>
+        </div>
+    </div>
+
+    <!-- Encabezado y Ficha Principal del Salon -->
+    <div class="card-editorial bg-white p-6 space-y-6">
+        <div class="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6">
+            <div class="space-y-3 max-w-2xl">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="badge-spot badge-spot-blue font-mono">
+                        {{ salon.id_salon }}
+                    </span>
+                    <span class="badge-spot badge-spot-neutral">
+                        {{ salon.tipo }}
+                    </span>
+                    <span class="badge-spot badge-spot-neutral">
+                        {{ salon.ubicacion }}
+                    </span>
+                </div>
+                <div class="text-xs text-[#6E6D6A] space-y-1 pt-1">
+                    <div>
+                        <span class="font-medium text-[#111111]">Ubicacion fisica:</span>
+                        <span class="text-[#111111]">{{ salon.ubicacion }}</span>
+                    </div>
+                    <div>
+                        <span class="font-medium text-[#111111]">Horario disponible:</span>
+                        <span class="font-mono text-[#111111]">{{ salon.horario_disponible }}</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Resumen Operativo Bento -->
+            <div class="bg-[#FBFBFA] border border-[#EAEAEA] rounded-[6px] p-4 min-w-[260px] text-left sm:text-right space-y-1.5">
+                <div class="text-[10px] font-semibold uppercase tracking-wider text-[#6E6D6A]">Aforo Maximo Autorizado</div>
+                <div class="text-3xl font-bold font-mono text-[#111111]">{{ salon.capacidad_maxima }}</div>
+                <div class="text-xs text-[#6E6D6A] pt-1">
+                    Tarifa Referencial: <strong class="text-[#111111] font-mono">{{ salon.tarifa_referencial | clp }}</strong>
+                </div>
+                <div class="text-[11px] text-[#6E6D6A]">
+                    Disponibilidad: <span class="font-mono">{{ salon.horario_disponible }}</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Especificaciones Tecnicas y Equipamiento -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-[#EAEAEA]">
+            <div class="bg-[#FBFBFA] p-4 rounded-[6px] border border-[#EAEAEA] space-y-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-[#111111] block">
+                    Equipamiento y Tecnologia Integrada:
+                </span>
+                <p class="text-xs text-[#6E6D6A] leading-relaxed">
+                    {{ salon.equipamiento }}
+                </p>
+            </div>
+
+            <div class="bg-[#FBFBFA] p-4 rounded-[6px] border border-[#EAEAEA] space-y-2">
+                <span class="text-[11px] font-semibold uppercase tracking-wider text-[#111111] block">
+                    Capacidad Segun Formato de Montaje:
+                </span>
+                <div class="grid grid-cols-2 gap-2 text-xs">
+                    <div class="bg-white p-2.5 rounded-[4px] border border-[#EAEAEA]">
+                        <span class="text-[#6E6D6A] text-[10px] block uppercase">Auditorio / Plenario:</span>
+                        <strong class="text-[#111111] font-mono text-sm">{{ salon.capacidad_maxima }} pers.</strong>
+                    </div>
+                    <div class="bg-white p-2.5 rounded-[4px] border border-[#EAEAEA]">
+                        <span class="text-[#6E6D6A] text-[10px] block uppercase">Banquete / Mesas:</span>
+                        <strong class="text-[#111111] font-mono text-sm">{{ (salon.capacidad_maxima * 0.7)|round|int }} pers.</strong>
+                    </div>
+                    <div class="bg-white p-2.5 rounded-[4px] border border-[#EAEAEA]">
+                        <span class="text-[#6E6D6A] text-[10px] block uppercase">Escuela / Capacitacion:</span>
+                        <strong class="text-[#111111] font-mono text-sm">{{ (salon.capacidad_maxima * 0.6)|round|int }} pers.</strong>
+                    </div>
+                    <div class="bg-white p-2.5 rounded-[4px] border border-[#EAEAEA]">
+                        <span class="text-[#6E6D6A] text-[10px] block uppercase">Mesa de Directorio:</span>
+                        <strong class="text-[#111111] font-mono text-sm">{{ (salon.capacidad_maxima * 0.3)|round|int if salon.capacidad_maxima > 20 else salon.capacidad_maxima }} pers.</strong>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Agenda Cronologica de Eventos y Fechas Booked del Salon -->
+    <div class="card-editorial bg-white p-6 space-y-4">
+        <div class="flex items-center justify-between border-b border-[#EAEAEA] pb-3">
+            <div>
+                <h2 class="text-sm font-semibold text-[#111111]">
+                    Agenda de Ocupacion: {{ salon.nombre }}
+                </h2>
+                <p class="text-xs text-[#6E6D6A]">
+                    Cronograma de fechas bloqueadas, eventos confirmados y licitaciones asociadas a este espacio.
+                </p>
+            </div>
+            <span class="badge-spot badge-spot-neutral font-mono">
+                {{ salon.reservas|length }} eventos registrados
+            </span>
+        </div>
+
+        {% if salon.reservas %}
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-[#EAEAEA] text-left text-xs">
+                <thead class="bg-[#FBFBFA] text-[#6E6D6A] font-medium uppercase text-[10px] tracking-wider">
+                    <tr>
+                        <th class="px-4 py-3">Fechas de Ocupacion</th>
+                        <th class="px-4 py-3">Cliente / Organismo (Booked Por)</th>
+                        <th class="px-4 py-3">Tipo de Evento</th>
+                        <th class="px-4 py-3">Horario</th>
+                        <th class="px-4 py-3 text-right">Aforo Estimado</th>
+                        <th class="px-4 py-3 text-center">Estado</th>
+                        <th class="px-4 py-3">Observaciones</th>
+                        <th class="px-4 py-3 text-right">Acciones</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-[#EAEAEA] bg-white">
+                    {% for r in salon.reservas %}
+                    <tr class="hover:bg-[#FBFBFA] transition-colors">
+                        <td class="px-4 py-3.5 whitespace-nowrap font-mono font-medium text-[#111111]">
+                            {% if r.fecha_inicio == r.fecha_fin %}
+                            {{ r.fecha_inicio }}
+                            {% else %}
+                            {{ r.fecha_inicio }} al {{ r.fecha_fin }}
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3.5">
+                            <div class="font-medium text-[#111111]">{{ r.organismo_o_empresa }}</div>
+                            <div class="text-[11px] text-[#6E6D6A]">{{ r.cliente_evento }}</div>
+                        </td>
+                        <td class="px-4 py-3.5 whitespace-nowrap">
+                            <span class="badge-spot badge-spot-neutral">
+                                {{ r.tipo_evento }}
+                            </span>
+                        </td>
+                        <td class="px-4 py-3.5 whitespace-nowrap font-mono text-[11px] text-[#6E6D6A]">
+                            {{ r.horario }}
+                        </td>
+                        <td class="px-4 py-3.5 whitespace-nowrap text-right font-mono font-medium text-[#111111]">
+                            {{ r.asistentes_estimados }} pers.
+                        </td>
+                        <td class="px-4 py-3.5 whitespace-nowrap text-center">
+                            {% if r.estado_reserva == 'Confirmada' %}
+                            <span class="badge-spot badge-spot-green">
+                                Confirmada
+                            </span>
+                            {% elif r.estado_reserva == 'Tentativa' %}
+                            <span class="badge-spot badge-spot-yellow">
+                                Tentativa
+                            </span>
+                            {% else %}
+                            <span class="badge-spot badge-spot-neutral">
+                                {{ r.estado_reserva }}
+                            </span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3.5 text-[11px] text-[#6E6D6A] max-w-xs">
+                            <div>{{ r.observaciones }}</div>
+                            {% if r.id_licitacion %}
+                            <div class="mt-1">
+                                <a href="{{ url_for('licitacion_detalle', id_licitacion=r.id_licitacion) }}" class="inline-flex items-center font-mono font-medium text-[#111111] hover:underline">
+                                    [Ver Licitacion: {{ r.id_licitacion }}]
+                                </a>
+                            </div>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3.5 whitespace-nowrap text-right text-xs">
+                            <div class="flex items-center justify-end space-x-2">
+                                <a href="{{ url_for('editar_reserva', id_reserva=r.id_reserva) }}" class="btn-secondary text-[11px] px-2 py-0.5 font-mono">
+                                    Editar
+                                </a>
+                                <form method="POST" action="{{ url_for('eliminar_reserva', id_reserva=r.id_reserva) }}" onsubmit="return confirm('Confirma la eliminacion de esta reserva de la agenda?');" class="inline">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <button type="submit" class="btn-ghost text-[11px] px-2 py-0.5 text-[#6E6D6A] hover:text-[#111111] cursor-pointer">
+                                        Eliminar
+                                    </button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <div class="text-center py-8 text-[#6E6D6A] bg-[#FBFBFA] rounded-[6px] border border-[#EAEAEA]">
+            <p class="text-xs font-medium">Este salon no registra eventos programados para las proximas fechas.</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
